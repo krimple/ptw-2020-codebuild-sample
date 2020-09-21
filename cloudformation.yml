@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Self hosted AWS application"
+
+Parameters:
+  CodeCommitRepoName:
+    Type: "String"
+    Description: "Name of the CodeCommit Repository containing the code to build"
+
+# Directly lifted from https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-s3.html
+# we're just creating an S3 bucket and using it to host a website written in Angular
+Resources:
+  # A bucket to host from
+  HostingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      BucketName: !Sub "${AWS::StackName}-hosting-bucket"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+    DeletionPolicy: Retain
+
+  ProjectArtifactsBucket:
+    Type: AWS::S3::Bucket
+
+  # Allow public access to the bucket contents to serve the content
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub "arn:aws:s3:::${HostingBucket}/*"
+      Bucket: !Ref HostingBucket
+
+  # CodeBuild needs an execution role for proper permissions during a run
+  # Add your AWS permissions depending on what you access within the scripts
+  CodeBuildExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-CodeBuildExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
+      Policies:
+        - # For S3 Hosting Bucket uploads
+          PolicyName: BucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - # Static Hosting Bucket upload...
+                Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:List*"
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                Resource:
+                  - !Sub 'arn:aws:s3:::${HostingBucket}'
+                  - !Sub 'arn:aws:s3:::${HostingBucket}/*'
+              - # Artifact Upload Bucket upload...
+                Effect: "Allow"
+                Action:
+                  # - "s3:CreateBucket"
+                  - "s3:GetObject"
+                  - "s3:List*"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ProjectArtifactsBucket}'
+                  - !Sub 'arn:aws:s3:::${ProjectArtifactsBucket}/*'
+        - # For Logging
+          PolicyName: CloudWatchLoggingAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/codebuild-logs/${AWS::StackName}:log-stream:angular-build-log/*'
+        - # CodeCommit repo access
+          PolicyName: CodeCommitRepoAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Action:
+                  - "codecommit:GitPull"
+                  - "codecommit:CancelUploadArchive"
+                  - "codecommit:GetBranch"
+                  - "codecommit:GetCommit"
+                  - "codecommit:GetUploadArchiveStatus"
+                  - "codecommit:UploadArchive"
+                Effect: Allow
+                Resource:
+                  - !Sub 'arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepoName}'
+        - # CodeCommit repo access
+          PolicyName: CodeBuildReportsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Action:
+                  # Narrow this to the permissions you need only by viewing the CloudTrail report
+                  # after running the build
+                  - "codebuild:*"
+                Effect: Allow
+                Resource:
+                  # Ultimately, we'd want to narrow this further, but it fails on a wildcard
+                  # with path elements. Match up with the stack name dash report name (karma)
+                  # and you can exert finer control
+                  - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*'
+
+  # The Codebuild project definition
+  CodeBuildForAngularApp:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${AWS::StackName}-codebuild"
+      Description: A simple codebuild script to deploy to S3 once Angular tests are built
+      ServiceRole: !GetAtt CodeBuildExecutionRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub "${ProjectArtifactsBucket}"
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Sub "/codebuild-logs/${AWS::StackName}"
+          Status: ENABLED
+          StreamName: "angular-build-log"
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: "HOSTING_BUCKET_NAME"
+            Value: !Ref HostingBucket
+      Source:
+        Location: !Sub 'https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CodeCommitRepoName}'
+        Type: CODECOMMIT
+        BuildSpec: 'buildspec-angular.yml'
+        GitCloneDepth: 1
+        SourceIdentifier: 'master'
+      TimeoutInMinutes: 10
+
+Outputs:
+  # What is the S3 bucket-based website URL?
+  WebsiteURL:
+    Value: !GetAtt "HostingBucket.WebsiteURL"
+    Description: URL for website hosted on S3
+
+  # The name of the bucket for any aws s3 commands
+  S3BucketName:
+    Value: !Ref HostingBucket
+    Description: "The created S3 bucket name"
+
+  CodeBuildProjectName:
+    Value: !Ref "CodeBuildForAngularApp"
+    Description: "The CodeBuild project name"
+
+  ArtifactBucketLocation:
+    Value: !Ref ProjectArtifactsBucket
+    Description: "The name of the S3 bucket that stores the built artifacts"
+

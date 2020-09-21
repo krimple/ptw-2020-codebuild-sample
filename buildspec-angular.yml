@@ -1,0 +1,34 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 12
+  build:
+    commands:
+      - cd angular-app
+      - npm install
+      - npm run test
+      - npm run build
+      - # if using Codebuild to deploy (should use CodePipeline instead)
+      - # you have access to aws commands. See the env var injected in
+      - # the cloudformation.yml script in this folder for the CodeBuild
+      - # environment section
+      - aws s3 rm s3://${HOSTING_BUCKET_NAME}/* --recursive
+      - aws s3 cp dist/angular-app/ s3://${HOSTING_BUCKET_NAME} --recursive
+
+reports:
+  karma:
+    base-directory: ./angular-app/test-reports
+    files:
+      - "TESTS-*"
+    file-format: JUNITXML
+artifacts:
+  base-directory: ./angular-app/dist/angular-app
+  files:
+    - '*'
+    - '**/*'
+  name: webapp
+  discard-paths: no
+
+
