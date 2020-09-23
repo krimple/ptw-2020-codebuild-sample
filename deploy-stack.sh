@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ "$#" -ne 2 ]; then
-  echo "Usage: ./setup-angular-codebuild.sh stack-name codecommit-repo-name"
+  echo "Usage: ./deploy-stack.sh stack-name codecommit-repo-name"
   exit 1
 fi
 
